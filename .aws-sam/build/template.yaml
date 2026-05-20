@@ -1,0 +1,166 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: "\U0001F308 Rainbow Forecast \u2014 \u540D\u53E4\u5C4B\u7248 \u540D\u53E4\
+  \u5C4B\u4E2D\u5FC3 100km \u570F\u5185 \u8679\u30B9\u30B3\u30A2\u30D0\u30C3\u30C1"
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 60
+    MemorySize: 256
+Parameters:
+  SNSPlatformArnSandbox:
+    Type: String
+    Default: arn:aws:sns:ap-northeast-1:473259746493:app/APNS_SANDBOX/RainbowForecastAPNs-Sandbox
+  SNSPlatformArnProduction:
+    Type: String
+    Default: arn:aws:sns:ap-northeast-1:473259746493:app/APNS/RainbowForecastAPNs-Production
+Resources:
+  ScoresBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Fn::Sub: ${AWS::AccountId}-rainbow-forecast-nagoya
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      CorsConfiguration:
+        CorsRules:
+        - AllowedHeaders:
+          - '*'
+          AllowedMethods:
+          - GET
+          - HEAD
+          AllowedOrigins:
+          - '*'
+          MaxAge: 600
+  ScoresBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: ScoresBucket
+      PolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal: '*'
+          Action: s3:GetObject
+          Resource:
+            Fn::Sub: arn:aws:s3:::${ScoresBucket}/*
+  SightingsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: rainbow-sightings-nagoya
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+      - AttributeName: id
+        AttributeType: S
+      KeySchema:
+      - AttributeName: id
+        KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+  SightingReporterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: rainbow-sighting-reporter-nagoya
+      Handler: handler.lambda_handler
+      CodeUri: SightingReporterFunction
+      Description: "\u8679\u306E\u76EE\u6483\u5831\u544A\u3092\u53D7\u3051\u53D6\u308A\
+        DynamoDB\u30FBS3\u306B\u4FDD\u5B58"
+      Environment:
+        Variables:
+          BUCKET_NAME:
+            Ref: ScoresBucket
+          SIGHTINGS_TABLE:
+            Ref: SightingsTable
+          CENTER_LAT: '35.17'
+          CENTER_LON: '136.91'
+      Policies:
+      - S3WritePolicy:
+          BucketName:
+            Ref: ScoresBucket
+      - Statement:
+        - Effect: Allow
+          Action:
+          - dynamodb:PutItem
+          - dynamodb:Scan
+          Resource:
+            Fn::GetAtt:
+            - SightingsTable
+            - Arn
+      Events:
+        ReportPost:
+          Type: HttpApi
+          Properties:
+            Path: /report
+            Method: POST
+    Metadata:
+      SamResourceId: SightingReporterFunction
+  RainbowFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: rainbow-forecast-nagoya
+      Handler: handler.lambda_handler
+      CodeUri: RainbowFunction
+      Description: "\u540D\u53E4\u5C4B 100km \u570F\u5185\u306E\u8679\u30B9\u30B3\u30A2\
+        \u3092 10 \u5206\u304A\u304D\u306B\u8A08\u7B97\u3057\u3066 S3 \u3078\u4FDD\
+        \u5B58\u30FBpush \u9001\u4FE1"
+      Environment:
+        Variables:
+          BUCKET_NAME:
+            Ref: ScoresBucket
+          DEVICES_TABLE: rainbow-device-locations
+          SIGHTINGS_TABLE:
+            Ref: SightingsTable
+          SNS_PLATFORM_ARN_SANDBOX:
+            Ref: SNSPlatformArnSandbox
+          SNS_PLATFORM_ARN_PROD:
+            Ref: SNSPlatformArnProduction
+          REGION_ID: nagoya
+      Policies:
+      - S3WritePolicy:
+          BucketName:
+            Ref: ScoresBucket
+      - Statement:
+        - Effect: Allow
+          Action: dynamodb:Scan
+          Resource:
+            Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/rainbow-device-locations
+        - Effect: Allow
+          Action: dynamodb:Scan
+          Resource:
+            Fn::GetAtt:
+            - SightingsTable
+            - Arn
+        - Effect: Allow
+          Action: sns:Publish
+          Resource: '*'
+      Events:
+        Every10Min:
+          Type: ScheduleV2
+          Properties:
+            Name: rainbow-forecast-nagoya-10min
+            ScheduleExpression: rate(10 minutes)
+            State: ENABLED
+    Metadata:
+      SamResourceId: RainbowFunction
+Outputs:
+  BucketName:
+    Value:
+      Ref: ScoresBucket
+  GeoJsonUrl:
+    Value:
+      Fn::Sub: https://${ScoresBucket}.s3.${AWS::Region}.amazonaws.com/latest.geojson
+  FunctionName:
+    Value:
+      Ref: RainbowFunction
+  SightingApiUrl:
+    Description: "\u8679\u76EE\u6483\u5831\u544A\u30A8\u30F3\u30C9\u30DD\u30A4\u30F3\
+      \u30C8"
+    Value:
+      Fn::Sub: https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com/report
+  SightingsJsonUrl:
+    Value:
+      Fn::Sub: https://${ScoresBucket}.s3.${AWS::Region}.amazonaws.com/sightings.json
