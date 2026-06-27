@@ -109,34 +109,35 @@ def offset_coordinate(lat, lon, azimuth_deg, distance_km):
                               math.cos(d) - math.sin(lat1) * math.sin(lat2))
     return math.degrees(lat2), math.degrees(lon2)
 
-def has_directional_rain(weather_map, lat, lon, anti_solar_az, distances=(10,), jma_map=None):
-    for dist in distances:
-        tlat, tlon = offset_coordinate(lat, lon, anti_solar_az, dist)
-        precip = _get_precip_at(tlat, tlon, weather_map, jma_map)
-        if precip > 0.1:
-            return True
+# ── 方向性降雨: 反太陽方向に扇状サンプリング（±40° × 2〜8km）───
+RAIN_FAN_AZ    = (-40, -20, 0, 20, 40)
+RAIN_FAN_DIST  = (2, 4, 6, 8)
+RAIN_THRESHOLD = 0.1   # mm/h
+
+def has_directional_rain(weather_map, lat, lon, anti_solar_az, jma_map=None):
+    for daz in RAIN_FAN_AZ:
+        az = (anti_solar_az + daz) % 360
+        for dist in RAIN_FAN_DIST:
+            tlat, tlon = offset_coordinate(lat, lon, az, dist)
+            if _get_precip_at(tlat, tlon, weather_map, jma_map) > RAIN_THRESHOLD:
+                return True
     return False
 
 def _get_precip_at(lat, lon, weather_map, jma_map):
-    if jma_map is not None:
-        lat_per_km = 1.0 / 111.0
-        lon_per_km = 1.0 / (111.0 * math.cos(math.radians(CENTER_LAT)))
-        di = (lat - CENTER_LAT) / (WEATHER_KM * lat_per_km)
-        dj = (lon - CENTER_LON) / (WEATHER_KM * lon_per_km)
-        i  = max(-HALF_W, min(HALF_W, round(di)))
-        j  = max(-HALF_W, min(HALF_W, round(dj)))
-        if (i, j) in jma_map:
-            return jma_map[(i, j)]
+    """JMAナウキャストのネイティブ解像度(約250m)で降水量(mm/h)。欠損時はOpen-Meteoにfallback。"""
+    v = jma_precip_at(jma_map, lat, lon)
+    if v is not None:
+        return v
     return lookup_weather(weather_map, lat, lon)['precipitation']
 
 # ── Rainbow score ─────────────────────────────────────────────
 def rainbow_score(sun_alt, cloud_cover, local_precip, directional_rain, solar_cloud=0):
     if not (0 <= sun_alt <= 42): return 0
-    if cloud_cover >= 40:        return 0
+    if cloud_cover >= 60:        return 0
     if solar_cloud >= 65:        return 0
-    if local_precip > 0.0:       return 0
+    if local_precip > 0.5:       return 0
     if not directional_rain:     return 0
-    score = 100.0 - max(0.0, cloud_cover - 5) * 3.0
+    score = 100.0 - max(0.0, cloud_cover - 10) * 1.5
     return round(max(0.0, min(100.0, score)))
 
 # ── JMA 高解像度降水ナウキャスト ──────────────────────────────
@@ -257,7 +258,23 @@ def fetch_jma_precip_map():
                 precip_map[(i, j)] = 0.0
     ok = sum(1 for v in tile_cache.values() if v)
     print(f'[JMA] bt={bt} tiles={ok}/{len(tile_cache)} pts={len(precip_map)}')
-    return precip_map
+    return {'bt': bt, 'vt': vt, 'tiles': tile_cache}
+
+def jma_precip_at(jma, lat, lon):
+    """JMAタイルのネイティブ画素から降水量(mm/h)。タイル欠損/範囲外はNone→Open-Meteoにfallback。"""
+    if jma is None:
+        return None
+    tx, ty, px, py = _latlon_to_tile_px(lat, lon, JMA_ZOOM)
+    parsed = jma['tiles'].get((tx, ty))
+    if not parsed:
+        return None
+    rows, w, h, trans = parsed
+    if not (0 <= px < w and 0 <= py < h):
+        return None
+    idx = _jma_idx(rows, px, py)
+    if idx < len(trans) and trans[idx] == 0:
+        return 0.0
+    return _JMA_PRECIP[idx] if idx < len(_JMA_PRECIP) else 0.0
 
 # ── Open-Meteo 天気取得 ───────────────────────────────────────
 def fetch_weather_map():
